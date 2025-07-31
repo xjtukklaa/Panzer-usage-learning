@@ -1,0 +1,180 @@
+\subsubsection{Panzer Laplace Example}
+Panzer 是Trilinos的复合物理场的统一管理包，可以耦合多个物理场，但这个使用起来比较抽象，
+这个模块设计的时候是考虑到了线性和非线性的问题，将一系列物理场进行耦合。如果还记得之前
+的自动微分包Sacado,在进行刚度矩阵计算的时候，会通过重载基类进行计算，计算的数值类型包括了
+三种$double,Sacado::Fad::DFad<double>$，正常计算有限元问题的时候就使用$double$，如果
+需要对问题进行非线性求解，就将计算类型的模板给定为$Sacado::Fad::DFad<double>$，两者
+使用的是同一套模板函数，这个设计也就是之前提到的计算单元刚度矩阵的同时计算$Jacobian$
+
+Panzer包括$DOFManager,ConnManager,ClosureModelManager,FieldManager$，这四个的作用包括网格管理，自由度管理，物理场管理和求解模型管理。因为代码有点多，没法一次性
+放到PDF上，所以只挑选其中一部分代码进行解释网格和自由度先不看，以Laplace方程为例理解物理场
+是如何进行计算和离散的。以下说明以Laplace方程和时变Laplace方程举例。
+
+\begin{lstlisting}
+struct Residual { typedef RealType ScalarT; };
+\end{lstlisting}
+\[
+\begin{aligned}
+    \nabla\cdot (c(u) \cdot u) = Q \\
+    R = \nabla u \cdot c(u) \cdot\nabla v - Q \\
+\end{aligned}
+\]
+上述问题为一个非线性的Laplace问题，其中$c(u)$表示和自变量$u$相关的分部场，$R$为离散化的求解方程。
+
+\begin{lstlisting}
+struct Jacobian { typedef FadType  ScalarT; };
+\end{lstlisting}
+\[
+\begin{aligned}
+    J &= \frac{\partial R}{\partial u} \\
+      &= \lim_{\epsilon\rightarrow 0}\frac{1}{\epsilon}
+        (R(u+\epsilon \delta u) - R(u))\\
+      &= \lim_{\epsilon\rightarrow 0}\frac{1}{\epsilon}
+         (\nabla (u+\epsilon \delta u) \cdot c(u+\epsilon \delta u)\cdot \nabla v 
+        -\nabla u \cdot c(u) \cdot\nabla v) \\
+      &= \nabla \delta u \cdot c(u) \cdot\nabla v + 
+          \nabla u\cdot c(u)_u \cdot \delta u \cdot \nabla v
+\end{aligned}
+\]
+对于这个非线性问题来说，进行空间离散后会形成如$A(u)u=Q$的形式，为了求解这个非线性问题，一般使用
+牛顿方法进行计算$R(u)+J \delta u = 0$，这样迭代到收敛，类似的
+方法还有许多的变种，但一般这个就够用了。
+
+\begin{lstlisting}
+struct Tangent  { typedef FadType  ScalarT; };
+\end{lstlisting}
+Tangent 敏度分析，以时变问题为例，p为参数
+\[
+\begin{aligned}
+\frac{\partial u}{\partial t} &= \nabla u\cdot c(p)\cdot \nabla v + Q\\
+\frac{u^n-u^{n-1}}{\Delta t} &= \nabla u^{n-1}\cdot c(p)\cdot \nabla v + Q\\
+(\frac{\partial u^n}{\partial p} - \frac{\partial u^{n-1}}{\partial p})&= 
+\Delta t\nabla u^{n-1} \cdot\frac{\partial c}{\partial p} \cdot\nabla v +
+\Delta t \nabla v \cdot c \cdot \nabla v \frac{\partial u^{n-1}}{\partial p}
+\end{aligned}
+\]
+以简单的差分格式举例，通过给定0时刻下的敏度初值,带入上述方程进行迭代可以计算得到最终时刻下的敏度，
+敏度扩散顺序和
+时间迭代顺序一致,一般被称为Tangent。和这个方程相对应的是伴随模型Adjoint，其敏度扩散顺序和
+时间迭代顺序相反，这两中方案只是求导的
+顺序不同，但是求解的结果是完全一致的，Tangent适用于参数个数比较少，优化目标比较多的情况，
+Adjoint适用于参数个数比较多，优化目标比较少的情况。
+
+EvalT 为实际计算的类型，主要包括两种选择正常计算使用的浮点数类型double,float非线性问题使用的自动微分类型FadType
+这个类的初始化方法需要传入参数文件,积分阶次,网格数据和全局的自由度数据,$build\_transient\_support$表示
+是否计算瞬态问题
+\begin{lstlisting}
+template <typename EvalT>
+Example::PoissonEquationSet<EvalT>::
+    PoissonEquationSet(const Teuchos::RCP<Teuchos::ParameterList> &params,
+                       const int &default_integration_order,
+                       const panzer::CellData &cell_data,
+                       const Teuchos::RCP<panzer::GlobalData> &global_data,
+                       const bool build_transient_support)
+: panzer::EquationSet_DefaultImpl<EvalT>(params, 
+                                         default_integration_order, 
+                                         cell_data, 
+                                         global_data, 
+                                         build_transient_support)
+{
+...
+}
+\end{lstlisting}
+
+这个部分设计的比较抽象,首先回忆一下正常的Laplace方程弱形式离散,正如上面写的,单元
+刚度矩阵为$\nabla v\cdot c \cdot\nabla v$的双线性形式,故此选定的基函数为$HGrad$,在
+添加完温度场后,再添加对应的梯度场.
+\begin{lstlisting}
+// 创建一个新的参数列表,给出默认的参数值,和传入的参数列表进行匹配
+// 如果传入没有这个参数则会加入进去
+Teuchos::ParameterList valid_parameters;
+this->setDefaultValidParameters(valid_parameters);
+
+valid_parameters.set("Model ID", "", "Closure model id associated with this equaiton set");
+valid_parameters.set("Basis Type", "HGrad", "Type of Basis to use");
+valid_parameters.set("Basis Order", 1, "Order of the basis");
+valid_parameters.set("Integration Order", -1, "Order of the integration rule");
+
+params->validateParametersAndSetDefaults(valid_parameters);
+// 获取参数
+std::string basis_type = params->get<std::string>("Basis Type");
+int basis_order = params->get<int>("Basis Order");
+int integration_order = params->get<int>("Integration Order");
+std::string model_id = params->get<std::string>("Model ID");
+
+// 这里声明创建一个TEMPERATURE的物理场
+this->addDOF("TEMPERATURE", basis_type, basis_order, integration_order);
+// 因为基函数类型为HGrad,这里需要温度场的梯度
+this->addDOFGrad("TEMPERATURE");
+// 如果计算瞬态问题,需要DTEMPERATURE_DT
+if (this->buildTransientSupport())
+  this->addDOFTimeDerivative("TEMPERATURE");
+// 将边界条件,物理区域组合起来
+this->addClosureModel(model_id);
+
+this->setupDOFs();
+\end{lstlisting}
+
+我们再来看添加完成自由度之后,如何实现离散化.Panzer的封装程度非常高,
+正常理解的组装过程可能是循环所有的网格,在每个网格上根据基函数确定梯度值,
+根据积分规则和阶数确定正交点,循环所有正交点,计算双线性形式,再根据实际网格
+尺寸计算等参变换的$Jacobian$矩阵和对应的行列式,最后根据全局自由度索引提交
+到总刚度矩阵上.
+
+这个过程是一般的有限元计算流程,但如何让这个过程更快?可以看到在参考单元上计算
+$\nabla\cdot v$的时候,所有单元(如果不考虑混合网格)是完全一致的,可以把这部分
+分离出来,所有网格只需要计算一次.Panzer的离散过程就只需要指定基函数乘以
+那一部分即可,其余过程可以自动进行.
+\begin{lstlisting}
+// 积分阶次
+RCP<IntegrationRule> ir = this->getIntRuleForDOF("TEMPERATURE");
+// 基函数类型
+RCP<BasisIRLayout> basis = this->getBasisIRLayoutForDOF("TEMPERATURE");
+// 定义瞬态项算子
+if (this->buildTransientSupport())
+{
+  // 残差R的名称,需要计算的v \dot Scalar中的Scalar对应的项
+  string resName("RESIDUAL_TEMPERATURE"), 
+         valName("DXDT_TEMPERATURE");
+  double multiplier(1);
+  // 此处不需要给出v的具体形式,只要给出
+  // v \dot Scalar中的Scalar对应的项即可
+  // 相当于v \dot DXDT_TEMPERATURE 
+  RCP<Evaluator<Traits>> op = 
+      rcp(new Integrator_BasisTimesScalar<EvalT, Traits>
+                  (EvaluatorStyle::CONTRIBUTES,
+                   resName, valName, *basis, *ir, multiplier));
+  // 创建这个算子
+  this->template registerEvaluator<EvalT>(fm, op);
+}
+
+// 定义扩散项算子 \int \nabla T \cdot \nabla v
+{
+  double thermal_conductivity = 1.0;
+
+  ParameterList p("Diffusion Residual");
+  p.set("Residual Name", "RESIDUAL_TEMPERATURE");
+  p.set("Flux Name", "GRAD_TEMPERATURE");
+  p.set("Basis", basis);
+  p.set("IR", ir);
+  p.set("Multiplier", thermal_conductivity);
+  // \nabla v \cdot Vec,Vec给定为GRAD_TEMPERATURE
+  RCP<Evaluator<Traits>> op = 
+        rcp(new Integrator_GradBasisDotVector<EvalT, Traits>(p));
+
+  this->template registerEvaluator<EvalT>(fm, op);
+}
+
+// 源项
+{
+  string resName("RESIDUAL_TEMPERATURE"),
+         valName("SOURCE_TEMPERATURE");
+  double multiplier(-1);
+  // v \cdot Scalar, Scalar给定为Q
+  RCP<Evaluator<Traits>> op = 
+      rcp(new Integrator_BasisTimesScalar<EvalT, Traits>
+                  (EvaluatorStyle::CONTRIBUTES,
+                  resName, valName, *basis, *ir, multiplier));
+  this->template registerEvaluator<EvalT>(fm, op);
+}
+\end{lstlisting}

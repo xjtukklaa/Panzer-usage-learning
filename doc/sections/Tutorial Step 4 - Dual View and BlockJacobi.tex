@@ -1,0 +1,277 @@
+\subsubsection{Tutorial Step 4 - Dual View and BlockJacobi}
+正常的数据类型为Kokkos::View<double*,MemSpace,...>，为了使得这套代码能够自动适用于CPU和GPU，
+使用Kokkos::DualView<double *>进行计算，这个可以分为两个部分理解，如果都在HostSpace空间中，
+那么DualView就是原始View的一个别名，指向同一地址；如果在DeviceSpace，将创建一个在HostSpace的
+引用，让CPU访问。
+
+以下为头文件functors.hpp中的内容
+\begin{lstlisting}
+#include <Kokkos_Core.hpp>
+#include <Kokkos_DualView.hpp>
+
+typedef Kokkos::DualView<double *> view_type;
+const double density_0 = 1;
+const double temperature_0 = 300;
+
+template <class ExecutionSpace>
+struct ComputePressure
+{
+
+    static constexpr double gasConstant = 1;
+
+    typedef ExecutionSpace execution_space;
+    // std::conditional类似三目运算符, i == j ? 1 : 0
+    // std::is_same<ExecutionSpace, Kokkos::DefaultExecutionSpace>::value 当前的ExecutionSpace和DefaultExecutionSpace
+    // 是否一致,是则返回view_type::memory_space,否则则返回view_type::host_mirror_space
+    typedef typename std::conditional<std::is_same<ExecutionSpace, Kokkos::DefaultExecutionSpace>::value,
+                                      view_type::memory_space, view_type::host_mirror_space>::type memory_space;
+
+    // scalar_array_type = double *
+    // const_data_type = const double *
+    Kokkos::View<view_type::scalar_array_type, view_type::array_layout,
+                 memory_space>
+        pressure;
+    Kokkos::View<view_type::const_data_type, view_type::array_layout,
+                 memory_space, Kokkos::MemoryRandomAccess>
+        temperature;
+    Kokkos::View<view_type::const_data_type, view_type::array_layout,
+                 memory_space, Kokkos::MemoryRandomAccess>
+        density;
+
+    // 初始化方法
+    ComputePressure(view_type dv_pressure, view_type dv_temperature, view_type dv_density)
+    {
+        // 获得正确的符合当前运行空间的View
+        pressure = dv_pressure.template view<memory_space>();
+        density = dv_density.template view<memory_space>();
+        temperature = dv_temperature.template view<memory_space>();
+        // 将Device上的View和Host上的View进行同步,类似MPI_Bcast(&data,Comm)
+        dv_pressure.sync<memory_space>();
+        dv_temperature.sync<memory_space>();
+        dv_density.sync<memory_space>();
+        // 表明dv_pressure被改动过
+        dv_pressure.modify<memory_space>();
+    }
+
+    //  p = \rho * gasConst * T
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const int i) const
+    {
+        pressure(i) = density(i) * gasConstant * temperature(i);
+    }
+};
+
+// 剩下两个类似
+template <class ExecutionSpace>
+struct ComputeInternalEnergy
+{
+
+    static constexpr double C_v = 1;
+
+    typedef ExecutionSpace execution_space;
+
+    typedef typename std::conditional<std::is_same<ExecutionSpace, Kokkos::DefaultExecutionSpace>::value,
+                                      view_type::memory_space, view_type::host_mirror_space>::type memory_space;
+
+    Kokkos::View<view_type::scalar_array_type, view_type::array_layout, memory_space> energy;
+
+    Kokkos::View<view_type::const_data_type, view_type::array_layout, memory_space, Kokkos::MemoryRandomAccess> temperature;
+
+    ComputeInternalEnergy(view_type dv_energy, view_type dv_temperature)
+    {
+        energy = dv_energy.template view<memory_space>();
+        temperature = dv_temperature.template view<memory_space>();
+
+        dv_energy.sync<memory_space>();
+        dv_temperature.sync<memory_space>();
+
+        // Mark energy as modified
+        dv_energy.modify<memory_space>();
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const int i) const
+    {
+        energy(i) = C_v * temperature(i);
+    }
+};
+
+template <class ExecutionSpace>
+struct ComputeEnthalpy
+{
+
+    typedef ExecutionSpace execution_space;
+
+    typedef typename std::conditional<std::is_same<ExecutionSpace, Kokkos::DefaultExecutionSpace>::value,
+                                      view_type::memory_space, view_type::host_mirror_space>::type memory_space;
+
+    Kokkos::View<view_type::scalar_array_type, view_type::array_layout, memory_space> enthalpy;
+
+    Kokkos::View<view_type::const_data_type, view_type::array_layout, memory_space, Kokkos::MemoryRandomAccess> density;
+    Kokkos::View<view_type::const_data_type, view_type::array_layout, memory_space, Kokkos::MemoryRandomAccess> pressure;
+    Kokkos::View<view_type::const_data_type, view_type::array_layout, memory_space, Kokkos::MemoryRandomAccess> energy;
+
+    ComputeEnthalpy(view_type dv_enthalpy, view_type dv_energy, view_type dv_pressure, view_type dv_density)
+    {
+
+        enthalpy = dv_enthalpy.view<memory_space>();
+        density = dv_density.view<memory_space>();
+        pressure = dv_pressure.view<memory_space>();
+        energy = dv_energy.view<memory_space>();
+
+        dv_density.sync<memory_space>();
+        dv_pressure.sync<memory_space>();
+        dv_energy.sync<memory_space>();
+
+        // Mark enthalpy as modified
+        dv_enthalpy.modify<memory_space>();
+    }
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const int i) const
+    {
+        enthalpy(i) = energy(i) + pressure(i) / density(i);
+    }
+};
+\end{lstlisting}
+以下为主文件中的内容
+\begin{lstlisting}
+#include <iostream>
+#include "functors.hpp"
+
+/*
+    这个案例主要是使用DualView实现在CPU和GPU上自动识别，提高不同平台之间的可移植性
+    相比于之前的CRS稀疏矩阵来说还是过于正常了，主要头文件中主要包括三个结构体，
+    实现计算能量，压力，焓。
+*/ 
+
+// 初始化密度和温度
+void load_state(view_type density, view_type temperature);
+// 计算压力
+void compute_pressure(view_type pressure, view_type density, view_type temperature);
+// 计算能量
+void compute_internal_energy(view_type energy, view_type temperature);
+// 计算焓值
+void compute_enthalpy(view_type enthalpy, view_type energy, view_type pressure, view_type density);
+// 检查计算结果
+void check_results(view_type pressure, view_type energy, view_type enthalpy);
+
+int main(int narg, char *arg[])
+{
+
+    std::cout << "initializing kokkos....." << std::endl;
+
+    Kokkos::initialize(narg, arg);
+
+    std::cout << "......done." << std::endl;
+    {
+    const int size = 1000000;
+    
+    // 创建DualView,初始化和View类似
+    view_type pressure("pressure", size);
+    view_type density("density", size);
+    view_type temperature("temperature", size);
+    view_type energy("energy", size);
+    view_type enthalpy("enthalpy", size);
+
+    load_state(density, temperature);
+
+    // this section of code is supposed to mimic the structure of a time loop in a
+    // more complex physics app
+    const size_t maxSteps = 1;
+    for (size_t step = 0; step < maxSteps; ++step)
+    {
+        compute_pressure(pressure, density, temperature);
+        compute_internal_energy(energy, temperature);
+        compute_enthalpy(enthalpy, energy, pressure, density);
+    }
+
+    check_results(pressure, energy, enthalpy);
+    }
+
+    Kokkos::finalize();
+}
+
+// 初始化压力和温度View
+void load_state(view_type density, view_type temperature)
+{
+    // Host View Mirror
+    view_type::t_host h_density = density.h_view;
+    view_type::t_host h_temperature = temperature.h_view;
+
+    // extent(0)表示View这个多维数组的各个方向的维度
+    // Kokkos::View<double*, MemSpace>,对应一维数组,extent(0)为向量长度
+    // Kokkos::View<double**, MemSpace>,对应二维数组,extent(0)和extent(1)为两个方向的长度
+    for (view_type::size_type j = 0; j < h_density.extent(0); ++j)
+    {
+    h_density(j) = density_0;
+    h_temperature(j) = temperature_0;
+    }
+
+    // 标记为被改动，这样sync同步的时候会实际的复制数组
+    density.modify<view_type::host_mirror_space>();
+    temperature.modify<view_type::host_mirror_space>();
+}
+
+// 三个结构体的包装
+void compute_pressure(view_type pressure, view_type density, view_type temperature)
+{
+    const int size = pressure.extent(0);
+
+    Kokkos::parallel_for(size, ComputePressure<view_type::execution_space>(pressure, temperature, density));
+    Kokkos::fence();
+}
+
+void compute_internal_energy(view_type energy, view_type temperature)
+{
+
+    const int size = energy.extent(0);
+    Kokkos::parallel_for(size, ComputeInternalEnergy<view_type::execution_space>(energy, temperature));
+    Kokkos::fence();
+}
+
+void compute_enthalpy(view_type enthalpy, view_type energy, view_type pressure, view_type density)
+{
+
+    const int size = enthalpy.extent(0);
+
+    Kokkos::parallel_for(size, ComputeEnthalpy<view_type::execution_space>(enthalpy, energy, pressure, density));
+    Kokkos::fence();
+}
+
+// 检查计算结果
+void check_results(view_type dv_pressure, view_type dv_energy, view_type dv_enthalpy)
+{
+
+    const double R = ComputePressure<view_type::host_mirror_space>::gasConstant;
+    const double thePressure = R * density_0 * temperature_0;
+
+    const double cv = ComputeInternalEnergy<view_type::host_mirror_space>::C_v;
+    const double theEnergy = cv * temperature_0;
+
+    const double theEnthalpy = theEnergy + thePressure / density_0;
+
+    auto pressure = dv_pressure.h_view;
+    auto energy = dv_energy.h_view;
+    auto enthalpy = dv_enthalpy.h_view;
+
+    dv_pressure.sync<view_type::host_mirror_space>();
+    dv_energy.sync<view_type::host_mirror_space>();
+    dv_enthalpy.sync<view_type::host_mirror_space>();
+
+    double pressureError = 0;
+    double energyError = 0;
+    double enthalpyError = 0;
+    const int size = energy.extent(0);
+    for (int i = 0; i < size; ++i)
+    {
+    pressureError += (pressure(i) - thePressure) * (pressure(i) - thePressure);
+    energyError += (energy(i) - theEnergy) * (energy(i) - theEnergy);
+    enthalpyError += (enthalpy(i) - theEnthalpy) * (enthalpy(i) - theEnthalpy);
+    }
+
+    std::cout << "pressure error = " << pressureError << std::endl;
+    std::cout << "energy error = " << energyError << std::endl;
+    std::cout << "enthalpy error = " << enthalpyError << std::endl;
+}
+\end{lstlisting}

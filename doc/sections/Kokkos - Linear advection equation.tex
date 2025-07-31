@@ -1,0 +1,44 @@
+\subsubsection{Kokkos - Linear advection equation}
+将从对流方程开始坐牢，这个方程的形式不算复杂，主要是使用连续FEM和离散FEM进行计算验证，
+众所周知，对于这个双曲方程来说，连续的FEM计算结果会出现非常的的震荡，并且这种震荡不会
+随着网格的细化而改善，主要原因是对流方程只约束了速度场的某一个方向导数上的值，但对于
+对应的正交方向没有约束，导致如果在边界或这某处出现震荡，这个震荡会沿着特征线扩散到
+起点处。
+
+首先来看一下SUPG修正后的连续FEM计算方法，所有内容都只是图个乐，看个乐子。首先是方程形式：
+\[
+    \beta(x,y,z) \nabla u = f \qquad u = g \ , \quad u\in \partial \Omega_{-}
+\]
+在上述的方程中，$\beta(x,y,z)$是一个向量场，会随着位置的变化而变化，边界$\partial\Omega_{-}$
+是入口边界，满足条件是$\{p\in\partial\Omega : \beta(p) \cdot \mathbf{n} < 0\}$，其实就是入口
+边界，然后开始离散化，SUPG格式是迎风流线稳定，具体做法就是试探函数取为$v+\delta\beta\nabla v$，
+，对于边界上的测试函数是完全看不明白，基本上就是推导半天得到的结论，取$\beta \cdot\mathbf{n} v$
+作为边界测试函数，书上这么说，我也这么写，最不想看懂的一集。
+
+所以上述说完基本上整个离散就结束了，最不想看懂的一集，别管怎么来的，先拿来用用看好不好，两边同时
+乘以测试函数并进行积分，如下：
+\[
+\begin{aligned}
+    \int_{\Omega} (v+\delta \beta \nabla v)\cdot \beta \nabla u - 
+    \int_{\partial\Omega_{-}} \beta\cdot \mathbf{n} v u =
+    \int_{\Omega} (v+\delta \beta \nabla v) f -
+    \int_{\partial\Omega_{-}} \beta\cdot \mathbf{n} v g
+\end{aligned}
+\]
+离散完成后就基本上按照上述进行计算即可，其实如果去掉边界的相，单纯的看原始方程的SUPG离散格式，
+可以倒退到原始的强形式为$\beta \nabla v + \delta \nabla \cdot [\beta \cdot (\beta\cdot \nabla u)]=0$
+，基本上就是多加了个扩散项，但又不是太大的扩散项，具体大小和网格的尺寸相关，也就是$\delta(h)$
+
+对于DG方法来说，还是需要需要稳定项，但只是在内部边界上，
+离散起来更为简洁，但是DG对于第一类边界条件要么加到弱形式里面，要么
+加入惩罚，处理起来比较抽象。离散格式如下：
+\[
+    \begin{aligned}
+        \int_{\Omega} v \beta \nabla u &= \int_{\partial\Omega} v \beta \cdot \mathbf{n} u -
+        \int_{\Omega} u \beta \nabla v \\
+        &= \int_{\partial\Omega_{-}} v \beta \cdot \mathbf{n} g + 
+           \int_{\partial\Omega_{+}} v \beta \cdot \mathbf{n} u +
+           \int_{\partial\Omega_{inner}} [v] \beta \cdot \mathbf{n} u^{upwind} -
+           \int_{\Omega} u \beta \nabla v
+    \end{aligned}
+\]

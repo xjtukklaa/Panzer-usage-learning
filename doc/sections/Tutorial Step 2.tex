@@ -1,0 +1,120 @@
+\subsubsection{Tutorial Step 2}
+这个教程主要介绍不同的储存顺序对于计算性能的影响，尤其是对于不同的架构
+而言，对于CPU来说，由于其有缓存机制，每次读取都不会单独读取一个，而是
+一次性读取相邻内存上的多个值放入缓存，那么在计算矩阵向量乘法的时候，
+在遍历矩阵的列时，每次读取多个列值进行计算，整行计算完成后，步进到下一
+行。对于GPU来说，由于存在合并访问机制，理想情况下合并效为100，
+否则会浪费大部分的带宽，所以为列优先(GPU部分比较胡编乱造，只能说看个乐)。
+\begin{lstlisting}
+#include <Kokkos_Core.hpp>
+#include <Kokkos_Timer.hpp>
+#include <iostream>
+#include <cstdio>
+// 并行空间
+using MemSpace = Kokkos::CudaSpace;
+
+// 二维的数组类型，LayoutLeft -> 列优先，LayoutRight -> 行优先
+// 对于CPU来说，矩阵Axb的过程中会大量读取和b中的值，为了提高
+// 计算效率，如果Axb中读取一次就可以得到A(i,j)->A(i,j+n)无疑
+// 会大大提高计算效率(Cache)，对应的是行优先。进一步，如果一次将这读取的
+// n个数一起计算，会有极为可观的收益(SIMD) 
+// 对GPU来说，GPU核心非常多，由于存在合并访问，行优先会浪费很多的带宽，
+// 一般是列优先
+using left_type = Kokkos::View<double **, Kokkos::LayoutLeft, MemSpace>;
+using right_type = Kokkos::View<double **, Kokkos::LayoutRight, MemSpace>;
+
+using view_type = Kokkos::View<double *, MemSpace>;
+
+// a.extent(0)，a.extent(1)指的是View的维数大小，NxM的N和M
+template <class ViewType>
+struct init_view
+{
+    ViewType a;
+    init_view(ViewType a_) : a(a_) {}
+
+    using size_type = typename ViewType::size_type;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const typename ViewType::size_type i) const
+    {
+    for (size_type j = 0; j < static_cast<size_type>(a.extent(1)); ++j)
+    {
+        a(i, j) = 1.0 * a.extent(0) * i + 1.0 * j;
+    }
+    }
+};
+
+template <class ViewType1, class ViewType2>
+struct contraction
+{
+    view_type a;
+    typename ViewType1::const_type v1;
+    typename ViewType2::const_type v2;
+    contraction(view_type a_, ViewType1 v1_, ViewType2 v2_)
+        : a(a_), v1(v1_), v2(v2_) {}
+
+    using size_type = typename view_type::size_type;
+
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const view_type::size_type i) const
+    {
+    for (size_type j = 0; j < static_cast<size_type>(a.extent(1)); ++j)
+    {
+        a(i) = v1(i, j) * v2(j, i);
+    }
+    }
+};
+
+// 向量内积
+struct dot
+{
+    view_type a;
+    dot(view_type a_) : a(a_) {}
+    using value_type = double;
+    KOKKOS_INLINE_FUNCTION
+    void operator()(const view_type::size_type i, double &lsum) const
+    {
+    lsum += a(i) * a(i);
+    }
+};
+
+int main(int argc, char *argv[])
+{
+    Kokkos::initialize(argc, argv);
+    {
+    int size = 10000;
+    view_type a("A", size);
+
+    // Define two views with LayoutLeft and LayoutRight.
+    left_type l("L", size, 10000);
+    right_type r("R", size, 10000);
+
+    // Initialize the data in the views.
+    Kokkos::parallel_for(size, init_view<left_type>(l));
+    Kokkos::parallel_for(size, init_view<right_type>(r));
+    // MPI_Barrier
+    Kokkos::fence();
+
+    Kokkos::Timer time1;
+    Kokkos::parallel_for(size, contraction<left_type, right_type>(a, l, r));
+    Kokkos::fence();
+    double sec1 = time1.seconds();
+
+    double sum1 = 0;
+    Kokkos::parallel_reduce(size, dot(a), sum1);
+    Kokkos::fence();
+
+    Kokkos::Timer time2;
+    Kokkos::parallel_for(size, contraction<right_type, left_type>(a, r, l));
+    Kokkos::fence();
+    double sec2 = time2.seconds();
+
+    double sum2 = 0;
+    Kokkos::parallel_reduce(size, dot(a), sum2);
+
+    printf("Result Left/Right %f Right/Left %f (equal result: %i)\n", sec1,
+            sec2, sum2 == sum1);    
+    }
+    Kokkos::finalize();
+}
+\end{lstlisting}

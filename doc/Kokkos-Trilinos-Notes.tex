@@ -1,0 +1,173 @@
+\documentclass[11pt, a4paper]{ctexart}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{hyperref}
+% 页面布局
+\geometry{a4paper, left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+\hypersetup{
+hidelinks,
+colorlinks=true,
+allcolors=black,
+pdfstartview=Fit,
+breaklinks=true
+}
+
+% 中文定理环境
+\theoremstyle{definition}
+\newtheorem{definition}{定义}[section]
+\newtheorem{example}{例}[section]
+\newtheorem{exercise}{练习}[section]
+
+\theoremstyle{plain}
+\newtheorem{theorem}{定理}[section]
+\newtheorem{lemma}[theorem]{引理}
+\newtheorem{proposition}[theorem]{命题}
+\newtheorem{corollary}{推论}
+
+\definecolor{mygreen}{rgb}{0,0.6,0}
+\definecolor{mygray}{rgb}{0.5,0.5,0.5}
+\definecolor{mymauve}{rgb}{0.58,0,0.82}
+
+\lstset{ %
+  backgroundcolor=\color{white},   % choose the background color; you must add \usepackage{color} or \usepackage{xcolor}
+  basicstyle=\footnotesize,        % the size of the fonts that are used for the code
+  breakatwhitespace=false,         % sets if automatic breaks should only happen at whitespace
+  breaklines=true,                 % sets automatic line breaking
+  captionpos=bl,                    % sets the caption-position to bottom
+  commentstyle=\color{mygreen},    % comment style
+  deletekeywords={...},            % if you want to delete keywords from the given language
+  escapeinside={\%*}{*)},          % if you want to add LaTeX within your code
+  extendedchars=true,              % lets you use non-ASCII characters; for 8-bits encodings only, does not work with UTF-8
+  frame=single,                    % adds a frame around the code
+  keepspaces=true,                 % keeps spaces in text, useful for keeping indentation of code (possibly needs columns=flexible)
+  keywordstyle=\color{blue},       % keyword style
+  language=c++,                 % the language of the code
+  morekeywords={*,...},            % if you want to add more keywords to the set
+  numbers=left,                    % where to put the line-numbers; possible values are (none, left, right)
+  numbersep=5pt,                   % how far the line-numbers are from the code
+  numberstyle=\tiny\color{mygray}, % the style that is used for the line-numbers
+  rulecolor=\color{black},         % if not set, the frame-color may be changed on line-breaks within not-black text (e.g. comments (green here))
+  showspaces=false,                % show spaces everywhere adding particular underscores; it overrides 'showstringspaces'
+  showstringspaces=false,          % underline spaces within strings only
+  showtabs=false,                  % show tabs within strings adding particular underscores
+  stepnumber=1,                    % the step between two line-numbers. If it's 1, each line will be numbered
+  stringstyle=\color{orange},     % string literal style
+  tabsize=2,                       % sets default tabsize to 2 spaces
+  %title=myPython.py                   % show the filename of files included with \lstinputlisting; also try caption instead of title
+}
+
+% 自定义命令
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\diff}{\mathop{}\!\mathrm{d}}
+
+\title{Kokkos Trilinos 学习}
+\author{曾祥磊}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+\newpage
+\section{Kokkos 学习}
+\subsection{Kokkos Tutorial}
+
+为了打代码和公式方便，使用\LaTeX 进行排版。书接上文，
+在完成了Kokkos的安装和使用后，我们已经能够正常的使用
+Kokkos进行并行计算。从教程开始学习Kokkos的使用方法，
+gemm算法，SIMD指令，CrsMatrix，SparseMatrix，CG，GMRES
+，欧拉流的FVM求解。
+
+Kokkos目前用的人不多，但在开源HPC套件里面逐步适配，目前我
+了解和使用过的是Trilinos(sandia老本家)，分子动力学软件LAMMPS
+(想不到吧，这也是sandia本家的)，Petsc套件的GPU支持。这帮人里面
+有不少c++委员会的人，拉起了一个提案，为在c23标准下为c++的STL提供一个
+多维数组的接口，实现矩阵向量和张量计算，包含在std::mdspan中。
+
+如果你这两个都用过，会非常惊奇的发现(这俩一帮人写的)用法和模板参数几乎
+一致。如下为mdspan和kokkos的核心模板参数，基本上包括参数类型，多维数组的长度，
+排布方式，访问方式。
+
+\begin{lstlisting}
+  template <class T,
+            class Extents,
+            class LayoutPolicy = std::layout_right, 
+            class AccessorPolicy = std::default_accessor<T>> 
+\end{lstlisting}
+
+\begin{lstlisting}
+template <class DataType 
+       [, class LayoutType] 
+       [, class MemorySpace] 
+       [, class MemoryTraits]>
+  class View
+  {
+    ...
+  };
+\end{lstlisting}
+
+既然都搞定矩阵表示了，为什么不把矩阵向量计算顺带也搞定。巧了，这帮人也是这么
+想的，除了mdspan提案，还将在c26标准中，实现blas的所有功能，包含在std::linalg
+头文件中，作为mdspan的延申。
+
+\include{sections/Tutorial Step 1}
+
+\include{sections/Tutorial Step 2}
+
+\include{sections/Tutorial Step 3 - GEMM and Euler Flow}
+
+\include{sections/Tutorial Step 4 - Dual View and BlockJacobi}
+
+\include{sections/Kokkos - Euler Equation}
+
+\include{sections/Kokkos - Linear advection equation}
+
+\section{Trilinos 学习}
+\subsection{Trilinos Panzer}
+
+Trilinos是和Petsc类似的HPC计算基本库，相比Petsc来说，Trilinos项目更大，代码更加现代化，
+特指c++模板一堆，这个有好有坏，学习成本比较高，但是功能非常强大，用户层面比较高，可以
+专注于功能的实现，不需要考虑不同架构上的性能问题(最新一代的矩阵向量Tpetra建立在Kokkos上)
+。Petsc使用c语言实现，核心功能非常明确矩阵Mat，向量Vec，线性求解器Ksp，非线性求解器Sens，
+时间积分求解Ts，优化求解Tao，个人建议最好配置的时候外部配置一下SUNDIALS，提供一系列时间积分
+求解方法以及切线敏度和伴随敏度分析。
+
+以下是从官网上扣下来的几个模块的介绍，计算效率比手写的高出一大截()
+\begin{itemize}
+  \item ARKODE, a solver with one-step methods for stiff, nonstiff, mixed stiff-nonstiff, and multirate ODE systems.
+  \item CVODE, a solver with Adams and BDF methods for stiff and nonstiff ODE systems.
+  \item CVODES, an extension of CVODE with forward and adjoint sensitivity analysis capabilities for stiff and nonstiff ODE systems.
+  \item IDA, a solver with BDF methods for DAE systems.
+  \item IDAS, an extension of IDA with forward and adjoint sensitivity analysis capabilities for DAE systems.
+  \item KINSOL, a solver for nonlinear algebraic systems.
+\end{itemize}
+Petsc中Ts也提供许多时间积分求解器，如BDF，$\theta$法，RK，IMEX等，最近提供了伴随导数的计算，
+以及伪时间步进方法。
+
+说了这么多Petsc相关的内容，Trilinos里面有什么不同吗?，确实不同，上面所说的内容，Trilinos里面都提供，
+甚至还有更多。Petsc本身并不提供特征值计算，Slepc作为Petsc的外延，提供基于子空间投影方法的特征值计算
+方案。以我的使用体验，低网格数下，Petsc效率比Trilinos略高一点，但高网格和复杂方程下，Petsc的编写成本
+会非常高，计算效率比Trilinos低不少。这里不是因为Petsc本身的计算效率不高，而是因为对于复杂PDE来说，
+计算Jacobian和求解线性系统非常耗时，手写代码效率一般。
+
+其次还有一点，Trilinos提供自动微分，在实现计算的同时，通过模板改变数值类型可以做到自动求解Jacobian，
+只需要将弱形式编写完成，对应的Jacobian可以使用自动微分计算。最后，Petsc的不提供有限元，有限体，有限差分
+等方法的实现，需要自己手动编写。上限自然是有的，但取决于个人的代码水平。如果你对openmpi，openmp，simd非常
+理解，能够避免并行计算的常见错误，提高计算效率，自然计算效率很高。但其实大伙都不怎么会，写出来的基本上也就是
+能跑的水平，至于性能不是重点，更关注方程和收敛性。这时Trilinos的优势就凸显出来。
+
+\include{sections/Trilinos Tpetra MultiVector and CrsMatrix}
+
+\include{sections/Galeri Belos Ifpack2}
+
+\include{sections/Panzer Laplace Example}
+
+\include{sections/Convection Equation Example}
+
+\end{document}

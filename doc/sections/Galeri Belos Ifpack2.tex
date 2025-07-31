@@ -1,0 +1,272 @@
+\subsubsection{Galeri, Belos \&\& Ifpack2}
+感觉现在刚开始用这套代码，就是纯纯的缝合，先去对应的包里面找教程和案例，再
+把这些教程的内容复合在一起，得到需要的东西，刚开始先暂时不考虑组装的问题，
+使用Geleri有限差分构建需要的矩阵和向量，Belos线性求解器，Ifpack2预处理器。
+先简单实验一下.
+\begin{lstlisting}
+// Ifpack2
+#include <Ifpack2_Factory.hpp>
+#include <Ifpack2_Preconditioner.hpp>
+
+// Teuchos
+#include <Teuchos_Assert.hpp>
+#include <Teuchos_CommandLineProcessor.hpp>
+#include <Teuchos_ParameterList.hpp>
+#include <Teuchos_StandardCatchMacros.hpp>
+
+// Tpetra
+#include <Tpetra_Core.hpp>
+#include <Tpetra_CrsMatrix.hpp>
+#include <Tpetra_Map.hpp>
+#include <Tpetra_MatrixIO.hpp>
+#include <Tpetra_MultiVector.hpp>
+#include <Tpetra_Operator.hpp>
+
+// Belos
+#include "BelosConfigDefs.hpp"
+#include "BelosLinearProblem.hpp"
+#include "BelosTFQMRSolMgr.hpp"
+#include "BelosTpetraAdapter.hpp"
+
+// Galeri
+#include <Galeri_XpetraMaps.hpp>
+#include <Galeri_XpetraMatrixTypes.hpp>
+#include <Galeri_XpetraProblemFactory.hpp>
+
+int main(int argc, char *argv[])
+{
+    // 浮点数类型
+    using ST = typename Tpetra::MultiVector<>::scalar_type;
+    // 局部自由度索引类型
+    using LO = typename Tpetra::MultiVector<>::local_ordinal_type;
+    // 全局自由度索引类型
+    using GO = typename Tpetra::MultiVector<>::global_ordinal_type;
+    // Kokkos 运行空间
+    // 如果安装了CUDA,默认就在CUDA上跑
+    // using NT = typename Tpetra::MultiVector<>::node_type;
+    // 可以手动选择运行空间
+    using NT = typename Tpetra::KokkosCompat::KokkosOpenMPWrapperNode;
+    // 线性算子，矩阵的抽象封装
+    using OP = typename Tpetra::Operator<ST, LO, GO, NT>;
+    // 多重向量
+    using MV = typename Tpetra::MultiVector<ST, LO, GO, NT>;
+
+    // 矩阵稀疏模板
+    using tmap_t = Tpetra::Map<LO, GO, NT>;
+    // 稀疏矩阵
+    using tcrsmatrix_t = Tpetra::CrsMatrix<ST, LO, GO, NT>;
+
+    // 定义Belos统一的外部向量封装接口
+    using MVT = typename Belos::MultiVecTraits<ST, MV>;
+    // 定义Belos统一的外部矩阵封装接口
+    using OPT = typename Belos::OperatorTraits<ST, MV, OP>;
+
+    // 浮点数类型当前的具体类型
+    using MT = typename Teuchos::ScalarTraits<ST>::magnitudeType;
+    // 浮点数类型的抽象封装
+    using STM = typename Teuchos::ScalarTraits<MT>;
+
+    // 定义线性问题
+    using LinearProblem = typename Belos::LinearProblem<ST, MV, OP>;
+    // 定义预处理器
+    using Preconditioner = typename Ifpack2::Preconditioner<ST, LO, GO, NT>;
+    // 线性求解器
+    using TFQMRSolMgr = typename Belos::TFQMRSolMgr<ST, MV, OP>;
+
+    // 智能指针
+    using Teuchos::RCP;
+    using Teuchos::rcp;
+    // 参数文件
+    using Teuchos::ParameterList;
+
+    Tpetra::ScopeGuard MyScope(&argc, &argv);
+    {
+        RCP<const Teuchos::Comm<int>> comm = Tpetra::getDefaultComm();
+        // RCP<Teuchos::FancyOStream> Myout = Teuchos::getFancyOStream(Teuchos::rcpFromRef(std::cout));
+
+        // Flag 是否使用左预处理
+        bool leftPrec = true;
+        // Int 参数决定RHS的个数
+        int RhsNum = 1;
+        // 迭代容差
+        MT tol = STM::squareroot(STM::eps());
+
+        // 网格的点数
+        int nx = 100;
+
+        // 命令行参数控制
+        Teuchos::CommandLineProcessor cmdp(false, true);
+        cmdp.setOption("LeftPrec", "RightPrec", &leftPrec, "Preconditioner Type");
+        cmdp.setOption("RHSnum", &RhsNum, "Number Of RHS");
+        cmdp.setOption("nx", &nx, "Number Of Grid");
+        if (cmdp.parse(argc, argv) != Teuchos::CommandLineProcessor::PARSE_SUCCESSFUL)
+        {
+            return EXIT_FAILURE;
+        }
+
+        // 通过Galeri创建稀疏模板,并填充数据
+        ParameterList GaleriList;
+        GaleriList.set("n", nx * nx * nx);
+        GaleriList.set("nx", nx);
+        GaleriList.set("ny", nx);
+        GaleriList.set("nz", nx);
+        GaleriList.set("mx", (int)comm->getSize());
+        GaleriList.set("my", 1);
+        GaleriList.set("mz", 1);
+        // 稀疏模板
+        RCP<tmap_t> MatrixMap =
+            RCP{Galeri::Xpetra::CreateMap<LO, GO, tmap_t>("Cartesian3D", comm, GaleriList)};
+        // 稀疏矩阵类型
+        auto GaleriProblem =
+            Galeri::Xpetra::BuildProblem<ST, LO, GO, tmap_t, tcrsmatrix_t, MV>("Laplace3D", MatrixMap, GaleriList);
+        // 创建稀疏矩阵并计算
+        RCP<tcrsmatrix_t> MyMatrix = GaleriProblem->BuildMatrix();
+
+        // 创建右端项
+        RCP<MV> MyRHS = rcp(new MV(MatrixMap, RhsNum));
+        // 创建解向量
+        RCP<MV> MySolution = rcp(new MV(MatrixMap, RhsNum));
+        // 创建正确的解向量
+        RCP<MV> MyExSolution = rcp(new MV(MatrixMap, RhsNum));
+        // 将解向量随机化
+        MVT::MvRandom(*MyExSolution);
+        // RHS = A * EXSolution
+        OPT::Apply(*MyMatrix, *MyExSolution, *MyRHS);
+
+        // 设定Ifpack2 ILU预处理器
+        std::string precType = "RILUK";
+        RCP<Preconditioner> prec = Ifpack2::Factory::create<tcrsmatrix_t>(precType, MyMatrix);
+        
+        TEUCHOS_ASSERT(prec != Teuchos::null);
+
+        // 预处理参数
+        int lFill = 2;
+        int overlap = 2;
+        ST absThresh = 0.0;
+        ST relThresh = 1.0;
+
+        ParameterList precParams;
+        precParams.set("fact: iluk level-of-fill", lFill);
+        precParams.set("fact: iluk level-of-overlap", overlap);
+        precParams.set("fact: absolute threshold", absThresh);
+        precParams.set("fact: relative threshold", relThresh);
+        prec->setParameters(precParams);
+        // 初始化预处理器并计算具体值
+        prec->initialize();
+        prec->compute();
+
+        int MaxIters = MyRHS->getGlobalLength() - 1;
+        // 设定线性求解器
+        ParameterList belosList;        
+        belosList.set("Maximum Iterations", MaxIters);
+        belosList.set("Convergence Tolerance", tol);    
+        belosList.set("Explicit Residual Test", true); 
+        belosList.set("Verbosity", 
+                       Belos::Errors + 
+                       Belos::Warnings + 
+                       Belos::TimingDetails + 
+                       Belos::StatusTestDetails);
+
+        // 定义线性问题
+        RCP<LinearProblem> MyProblem = rcp(new LinearProblem(MyMatrix,MySolution,MyRHS));
+        if (leftPrec)
+        {
+            MyProblem->setLeftPrec(prec);            
+        }
+        else
+        {
+            MyProblem->setRightPrec(prec);  
+        }
+
+        bool set = MyProblem->setProblem();
+        if (set == false)
+        {
+            std::cout << std::endl
+                          << "ERROR:  Belos::LinearProblem failed to set up correctly!" << std::endl;
+            return EXIT_FAILURE;
+        }
+        
+        // 创建线性求解器
+        RCP<TFQMRSolMgr> MySolver = rcp(new TFQMRSolMgr(MyProblem,rcp(&belosList,false)));
+        
+        std::cout << "Solving..." << std::endl;
+        Belos::ReturnType ret = MySolver->solve();
+        std::cout << "Solve end" << std::endl;
+
+        // 将求解的解和真解对比
+        bool badRes = false;
+        std::vector<ST> actualResids(RhsNum);
+        std::vector<ST> rhsNorm(RhsNum);
+
+        // 残差向量
+        MV resids(MatrixMap, RhsNum);
+        // r = A*x - b
+        OPT::Apply(*MyMatrix, *MySolution, resids);
+        MVT::MvAddMv(-1.0, resids, 1.0, *MyRHS, resids);
+        // 
+        MVT::MvNorm(resids, actualResids,Belos::TwoNorm);
+        MVT::MvNorm(*MyRHS, rhsNorm);
+        // 
+        std::cout << "---------- Actual Residuals (normalized) ----------" << std::endl
+                    << std::endl;
+        for (int i = 0; i < RhsNum; i++)
+        {
+            ST actRes = actualResids[i] / rhsNorm[i];
+            std::cout << "Problem " << i << " : \t" << actRes << std::endl;
+            if (actRes > tol)
+                badRes = true;
+        }
+        // 
+        if (ret != Belos::Converged || badRes)
+        {
+            std::cout << std::endl
+                          << "ERROR:  Belos did not converge!" << std::endl;
+        }
+        else
+        {
+            std::cout << std::endl
+                          << "SUCCESS:  Belos converged!" << std::endl;
+        }
+    }
+    return EXIT_SUCCESS;
+}
+\end{lstlisting}
+
+\newpage
+\begin{table}[htbp]
+\setlength{\tabcolsep}{8mm}
+\begin{tabular}{ccccc}
+\hline
+\multicolumn{1}{|c|}{\textbf{MPI/CUDA Run time}} & \multicolumn{1}{c|}{\textbf{Serial}} & \multicolumn{1}{c|}{\textbf{MPI NP 2}} & \multicolumn{1}{c|}{\textbf{MPI NP 4}} \\ \hline
+\multicolumn{1}{|c|}{\textbf{CUDA}} & \multicolumn{1}{c|}{4.78s} & \multicolumn{1}{c|}{1.89s} & \multicolumn{1}{c|}{1.43s} \\ \hline
+\multicolumn{1}{|c|}{\textbf{OpenMP}} & \multicolumn{1}{c|}{2.5s} & \multicolumn{1}{c|}{1.94s} & \multicolumn{1}{c|}{1.72s} \\ \hline
+\end{tabular}
+\caption{MPI/Serial CUDA/OpenMP 运行时间}
+\end{table}
+默认情况下$nx=100$且是三维问题，网格数量就是$nx^3$，自由度数量也是差不多的量级。
+预处理器使用$ILU$预处理。以下是具体的细节时间输出
+
+\begin{table}[htbp]
+\setlength{\tabcolsep}{5mm}
+\begin{tabular}{lllll}
+\hline
+\multicolumn{1}{|c|}{\textbf{Timer Name}} & \multicolumn{1}{c|}{\textbf{MinOverProcs}} & \multicolumn{1}{c|}{\textbf{MeanOverProcs}} & \multicolumn{1}{c|}{\textbf{MaxOverProcs}}  \\ \hline
+\multicolumn{1}{|c|}{\textbf{Op*x}} &         \multicolumn{1}{|c|}{0.1789}        &                  \multicolumn{1}{|c|}{ 0.2399}             &                 \multicolumn{1}{|c|}{0.2789}                      \\ \hline
+\multicolumn{1}{|c|}{\textbf{Prec*x}} &        \multicolumn{1}{|c|}{ 0.9508}        &               \multicolumn{1}{|c|}{0.9579}                 &               \multicolumn{1}{|c|}{0.9669}                                            \\ \hline
+\multicolumn{1}{|c|}{\textbf{TFQMRSolMgr}} &   \multicolumn{1}{|c|}{1.432}        &           \multicolumn{1}{|c|} {1.435}                    &             \multicolumn{1}{|c|}{1.438}             \\ \hline
+\multicolumn{1}{|c|}{\textbf{fillComplet}} &   \multicolumn{1}{|c|}{0.133 }       &            \multicolumn{1}{|c|}{0.1361}          &              \multicolumn{1}{|c|}{0.1372}                  \\ \hline
+\multicolumn{1}{|c|}{\textbf{generation}} &     \multicolumn{1}{|c|}{0.08773}        &           \multicolumn{1}{|c|}{0.089}            &               \multicolumn{1}{|c|}{0.09294}                     \\   \hline                   
+\end{tabular}
+\caption{具体运行时间}
+\end{table}
+
+时间消耗最长的是预处理器的计算和预处理器和向量的计算，在CUDA上计算的优势就是可以大幅的
+加速矩阵向量乘法的计算效率，可以得到非常明显的加速效果，CPU上由于不同节点之间的相互通信
+以及带宽的限制，加速效果具有明显的边际效应。在800w网格下的计算时间为
+\[
+\begin{aligned}
+    mpirun\ -np\ 4\ \&\&\ CUDA &:\ 33.26s\\
+    mpirun\ -np\ 4\ \&\&\ OpenMP &:\ 25.56s\\
+\end{aligned}
+\]
+此处OpenMP的计算速度快于CUDA的原因非常简单，(CUDA内存太小了，任务管理器显示内存使用满了)

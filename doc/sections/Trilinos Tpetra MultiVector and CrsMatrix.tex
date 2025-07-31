@@ -1,0 +1,151 @@
+\subsubsection{Trilinos Tpetra MultiVector and CrsMatrix}
+这段时间一直没更新主要是在看SUPG和DG，以及重新编译安装Trilinos，之前安装的版本缺少
+一些内容，没有网格输入输出(STK)和自由度管理(Panzer)。给我折磨坏了，最新release版本有问题，方程
+离散工具和自由度管理工具之间出现重复定义导致编译不通过，还得克隆下来master然后重新
+安装，目前应该是完全的安装好了。
+
+可能会比较迷惑的点在与Kokkos和Trilinos为啥会混合在一起，实际上Kokkos是Trilinos的
+一个子项目，也是最核心的底层架构，主要负责矩阵向量表示，稀疏矩阵计算。Tpetra就是
+以Kokkos为核心的线性代数核心包，因为网上的Trilinos介绍非常少，在此处简单的列举
+安装上的核心库的主要作用。
+
+\begin{itemize}
+    \item Kokkos/KokkosKernels 核心底层
+    \item Tpetra/Xpetra        线性代数表示/抽象接口
+    \item Teuchos              提供参数文件/命令行参数，智能指针，MPI接口
+    \item Amesos2              提供外部的稀疏直接求解器，MUMPS,SuperLU,UMPACK
+    \item Anasazi              特征值计算
+    \item Belos                提供各种迭代方法，包括无矩阵接口
+    \item Galeri               提供有限差分法离散
+    \item ifpack2              提供一般的预处理，SOR，Jacobian之类
+    \item Intrepid2            提供旋度场，散度场，梯度场离散，基函数，正交规则
+    \item ...  
+\end{itemize}
+
+这里面有必要着重提及Sacado和Muelu，后者是提供平滑聚类多重网格个几何多重网格的包，
+前者是用于实现自动微分功能(尤其对于材料非线性，
+多相流，敏度分析这些东西)，你开始计算一个非线性材料的传热性能，辛辛苦苦推导出了对应
+的Jacobian方程，输入到对应的牛顿方法中，进行计算。你觉得这套方案一定能够适用其他问题，
+直到你遇到了多相流，参数敏度，你开始熬夜手搓，突然发现可以直接放弃大脑，拥抱现代c++。
+
+Sacado提供正向直接微分和反向伴随微分，微分精度为机器精度，同时和Tpetra矩阵向量通过
+模板结合，可以直接在cuda上跑。什么你说不是手动推导的没有灵魂，确实没有灵魂，但你手动
+推导直接切线方程和伴随方程还没结束，这边可能就编写求解代码，边重载计算敏度了，折磨自己
+不如折磨机器()
+
+如果你安装了Sacado，以下是一个小测试案例
+
+\begin{lstlisting}
+#include <Sacado.hpp>
+#include <iostream>
+using fad_double = Sacado::Fad::DFad<double>;
+int main() {
+  fad_double a,b,c;
+  a = 1; b = 2;
+  a.diff(0,2);  // Set a to be dof 0, in a 2-dof system.
+  b.diff(1,2);  // Set b to be dof 1, in a 2-dof system.
+  c = 2*a+cos(a*b);
+  double *derivs = &c.fastAccessDx(0); // Access derivatives
+  double a_value = 1, b_value = 2;
+  double dc_da = 2 - sin(a_value * b_value) * b_value;
+  double dc_db = - sin(a_value * b_value) * a_value;
+  std::cout << std::setprecision(16) << "Sacado : dc/da = " << derivs[0] << ", dc/db=" << derivs[1] << std::endl;
+  std::cout << std::setprecision(16)<< "Hands  : dc/da = " << dc_da << ", dc/db=" << dc_db << std::endl;
+}
+\end{lstlisting}
+
+其对应的输出结果如下：
+\[
+\begin{aligned}
+Sacado &: dc/da = 0.1814051463486366, dc/db=-0.9092974268256817\\
+Hands  &: dc/da = 0.1814051463486366, dc/db=-0.9092974268256817    
+\end{aligned}
+\]
+
+对于大型的离散问题来说，使用自动微分对整个矩阵进行计算似乎是不是非常的现实，
+但实际情况是，不会直接对整个稀疏矩阵进行计算，而是对每个单元刚度矩阵进行微分
+再进行组合，使用c++模板重载实现在计算总体矩阵的时候同时计算Jacobian矩阵。对于
+参数敏度更是如此，放弃智力，拥抱现代c++
+
+以下代码是使用Galeri进行Laplace方程的有限差分离散，主要是需要搞明白矩阵向量的初始化。
+
+\begin{lstlisting}
+#include "Galeri_XpetraMaps.hpp"
+#include "Galeri_MatrixTraits.hpp"
+#include "Galeri_XpetraMatrixTypes.hpp"
+#include "Galeri_XpetraProblemFactory.hpp"
+#include "Teuchos_DefaultComm.hpp"
+#include "Teuchos_ParameterList.hpp"
+
+#define GO long long
+#define Scalar int
+#define LO int
+#define Node Tpetra::KokkosCompat::KokkosOpenMPWrapperNode
+
+using namespace Galeri;
+int main(int argc, char *argv[])
+{
+    using Teuchos::RCP;
+    using Teuchos::rcp;
+    typedef Tpetra::Map<LO, GO, Node> Tpetra_Map;
+    typedef Tpetra::CrsMatrix<Scalar, LO, GO, Node> Tpetra_CrsMatrix;
+    typedef Tpetra::MultiVector<Scalar, LO, GO, Node> Tpetra_MultiVector;
+    typedef Teuchos::ScalarTraits<Scalar> ScalarTraits;
+#ifdef HAVE_MPI
+    MPI_Init(&argc, &argv);
+#endif
+    // Create comm
+    RCP<const Teuchos::Comm<int>> comm = Teuchos::DefaultComm<int>::getComm();
+    // Here we create the linear problem
+    //
+    //   Matrix * LHS = RHS
+    //
+    // with Matrix arising from a 5-point formula discretization.
+    std::string mapType = "Cartesian2D";
+    auto mapParameters = Teuchos::ParameterList("Tpetra::Map");
+    // dimension of the problem is nx x ny
+    mapParameters.set("nx", 10 * comm->getSize());
+    mapParameters.set("ny", 10);
+    // total number of processors is mx x my
+    mapParameters.set("mx", comm->getSize());
+    mapParameters.set("my", 1);
+    mapParameters.print();
+    auto out = Teuchos::getFancyOStream(Teuchos::rcpFromRef(std::cout));
+    try
+    {
+        // Creation of the map
+        auto map = RCP{Galeri::Xpetra::CreateMap<Scalar, GO, Tpetra_Map>(mapType, comm, mapParameters)};
+        // Creation of linear problem
+        auto problem = Galeri::Xpetra::BuildProblem<Scalar, LO, GO, Tpetra_Map, Tpetra_CrsMatrix, Tpetra_MultiVector>("Laplace2D", map, mapParameters);
+        // Build Matrix and MultiVectors
+        auto matrix = problem->BuildMatrix();
+        auto LHS = rcp(new Tpetra_MultiVector(matrix->getDomainMap(), 1));
+        auto RHS = rcp(new Tpetra_MultiVector(matrix->getRangeMap(), 1));
+        auto ExactSolution = rcp(new Tpetra_MultiVector(matrix->getDomainMap(), 1));
+        ExactSolution->randomize(0, 100);
+        LHS->putScalar(ScalarTraits::zero());
+        matrix->apply(*ExactSolution, *RHS);
+        matrix->describe(*out, Teuchos::EVerbosityLevel::VERB_EXTREME);
+        LHS->describe(*out, Teuchos::EVerbosityLevel::VERB_EXTREME);
+        RHS->describe(*out, Teuchos::EVerbosityLevel::VERB_EXTREME);
+        ExactSolution->describe(*out, Teuchos::EVerbosityLevel::VERB_EXTREME);
+        // at this point any LinearSolver can be used which understands the Tpetra objects. For example: Amesos2 or Ifpack2
+    }
+    catch (Galeri::Exception &rhs)
+    {
+        if (comm->getRank() == 0)
+        {
+            cerr << "Caught exception: ";
+            rhs.Print();
+#ifdef HAVE_MPI
+            MPI_Finalize();
+#endif
+            return (EXIT_FAILURE);
+        }
+    }
+#ifdef HAVE_MPI
+    MPI_Finalize();
+#endif
+    return (EXIT_SUCCESS);
+}
+\end{lstlisting}

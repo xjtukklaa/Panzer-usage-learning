@@ -1,0 +1,232 @@
+\subsubsection{Tutorial Step 1}
+Kokkos的练习代码包括两个部分，第一部分为原始的没有改为并行的
+代码，第二部分为改为并行后的修正代码，在此将原始代码保存为注释
+，修改后代码为正常运行代码。
+\begin{lstlisting}
+#include <limits>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <Kokkos_Core.hpp>
+
+// 检查命令行输入的N，M，S是否符合要求，nrepeat表示其重复计算次数
+void checkSizes(int &N, int &M, int &S, int &nrepeat);
+
+int main(int argc, char *argv[])
+{
+    int N = -1;
+    int M = -1;
+    int S = -1;
+    int nrepeat = 100;
+
+    // 命令行参数读取
+    for (int i = 0; i < argc; i++)
+    {
+    if ((strcmp(argv[i], "-N") == 0) || (strcmp(argv[i], "-Rows") == 0))
+    {
+        N = pow(2, atoi(argv[++i]));
+        std::cout << "  User N is " << N << std::endl;
+    }
+    else if ((strcmp(argv[i], "-M") == 0) || (strcmp(argv[i], "-Columns") == 0))
+    {
+        M = pow(2, atof(argv[++i]));
+        std::cout << "  User M is " << M << std::endl;
+    }
+    else if ((strcmp(argv[i], "-S") == 0) || (strcmp(argv[i], "-Size") == 0))
+    {
+        S = pow(2, atof(argv[++i]));
+        std::cout << "  User S is " << S << std::endl;
+    }
+    else if (strcmp(argv[i], "-nrepeat") == 0)
+    {
+        nrepeat = atoi(argv[++i]);
+    }
+    else if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "-help") == 0))
+    {
+        std::cout << "y^T*A*x Options: " << std::endl;
+        std::cout << "-Rows (-N) <int>:      rows (default: 4096) " << std::endl;
+        std::cout << "-Columns (-M) <int>:   columns (default: 1024) " << std::endl;
+        std::cout << "-Size (-S) <int>:      matrix (default: N*M ) " << std::endl;
+        std::cout << "-nrepeat <int>:        repeats (default: 100) "<< std::endl;
+        std::cout << "-help (-h):            print this message " << std::endl;
+        exit(1);
+    }
+    }
+
+    // 检查参数是否合规
+    checkSizes(N, M, S, nrepeat);
+
+    // Kokkos环境初始化，和MPI_Initialize用法一致，所以代码都需要在
+    // Initialize和Finalize之间
+    Kokkos::initialize(argc, argv);
+    {
+    // 检测可用并行空间
+    // EXERCISE give-away: Choose an Execution Space.
+    // using ExecSpace = Kokkos::Serial;
+    // using ExecSpace = Kokkos::Threads;
+    // using ExecSpace = Kokkos::OpenMP;
+    // using ExecSpace = Kokkos::Cuda;
+
+    // EXERCISE: Choose device memory space.
+    // using MemSpace = Kokkos::HostSpace;
+    // using MemSpace = Kokkos::CudaSpace;
+    // using MemSpace = Kokkos::CudaUVMSpace;
+
+    #ifdef KOKKOS_ENABLE_CUDA
+    #define MemSpace Kokkos::CudaSpace
+    #endif
+
+    #ifdef KOKKOS_ENABLE_HIP
+    #define MemSpace Kokkos::Experimental::HIPSpace
+    #endif
+
+    #ifdef KOKKOS_ENABLE_OPENMPTARGET
+    #define MemSpace Kokkos::OpenMPTargetSpace
+    #endif
+
+    #ifndef MemSpace
+    #define MemSpace Kokkos::HostSpace
+    #endif
+
+    // 并行空间
+    using ExecSpace = MemSpace::execution_space;
+    
+    // EXERCISE give-away: Use a RangePolicy.
+    // using range_policy = Kokkos::RangePolicy<ExecSpace>;
+    // 执行策略，在此模板只指定了并行空间
+    using range_policy = Kokkos::RangePolicy<ExecSpace>;
+
+    // EXERCISE give-away: Choose a Layout.
+    // EXERCISE: When exercise is correctly implemented, then
+    //           either layout will generate the correct answer.
+    //           However, performance will be different!
+
+    // using Layout = Kokkos::LayoutLeft;
+    using Layout = Kokkos::LayoutRight;
+
+    // Allocate y, x vectors and Matrix A on device.
+    // EXERCISE: Use MemSpace and Layout.
+    // Kokkos::View是Kokkos的通用的数组类型，类似std::shared_ptr
+    // 1D可以视为向量类型，2D视为矩阵类型
+    using ViewVectorType = Kokkos::View<double *, Layout, MemSpace>;
+    using ViewMatrixType = Kokkos::View<double **, Layout, MemSpace>;
+
+    // 定义需要的矩阵A和向量y，x
+    // 传入的字符串作为lable唯一的确定对应的实例，在debug中非常有效
+    ViewVectorType y("y", N);
+    ViewVectorType x("x", M);
+    ViewMatrixType A("A", N, M);
+
+    // CUDA中的数据不能被CPU访问和读取，如果需要进行改动，需要先创建
+    // CPU可访问的数据，也就是ViewVectorType::HostMirror
+    ViewVectorType::HostMirror h_y = Kokkos::create_mirror_view(y);
+    ViewVectorType::HostMirror h_x = Kokkos::create_mirror_view(x);
+    ViewMatrixType::HostMirror h_A = Kokkos::create_mirror_view(A);
+    
+    // 初始化y 
+    for (int i = 0; i < N; ++i)
+    {
+        h_y(i) = 1;
+    }
+
+    // 初始化x 
+    for (int i = 0; i < M; ++i)
+    {
+        h_x(i) = 1;
+    }
+
+    // 初始化A 
+    for (int j = 0; j < N; ++j)
+    {
+        for (int i = 0; i < M; ++i)
+        {
+        h_A(j, i) = 1;
+        }
+    }
+
+    // 由CPU可访问空间转移到对应的并行空间
+    Kokkos::deep_copy(y, h_y);
+    Kokkos::deep_copy(x, h_x);
+    Kokkos::deep_copy(A, h_A);
+
+    // 计时器
+    Kokkos::Timer timer;
+
+    for (int repeat = 0; repeat < nrepeat; repeat++)
+    {
+
+        double result = 0;
+
+        // 将yAx分解为y(j) * \sum_{i=0,M} A(j,i) * x(i)
+        // range_policy(start,end,...)指定起始和结束index
+        // KOKKOS_LAMBDA自动根据并行空间指定LAMBDA函数的初始化类型
+        Kokkos::parallel_reduce("yAx", range_policy(0, N), 
+        KOKKOS_LAMBDA (int j, double &update) {
+        double temp2 = 0;
+
+        for ( int i = 0; i < M; ++i ) {
+        temp2 += A( j, i ) * x( i );
+        }
+
+        update += y( j ) * temp2; }, result);
+
+        if (repeat == (nrepeat - 1))
+        {
+        std::cout << "  Computed result for " << N 
+                    << " x " << M << " is " << result << std::endl;
+        }
+    }
+    // 计算时间
+    double time = timer.seconds();
+    // 计算带宽
+    double Gbytes = 1.0e-9 * double(sizeof(double) * (M + M * N + N));
+
+    std::cout << "  N( " << N << " ) "
+              << "  M( " << M << " ) "
+              << "  nrepeat ( " << nrepeat << " ) "
+              << "  problem( " << Gbytes * 1000 << " MB ) "
+              << "  time( " << time << " s ) "
+              << "  bandwidth( " << Gbytes * nrepeat / time << " GB/s )" << std::endl;
+    }
+    // 结束Kokkos
+    Kokkos::finalize();
+
+    return 0;
+}
+
+void checkSizes(int &N, int &M, int &S, int &nrepeat)
+{
+
+    if (S == -1 && (N == -1 || M == -1))
+    {
+    S = pow(2, 22);
+    if (S < N)
+        S = N;
+    if (S < M)
+        S = M;
+    }
+
+    if (S == -1)
+    S = N * M;
+
+    if (N == -1 && M == -1)
+    {
+    if (S > 1024)
+    {
+        M = 1024;
+    }
+    else
+    {
+        M = S;
+    }
+    }
+
+    if (M == -1)
+    M = S / N;
+
+    if (N == -1)
+    N = S / M;
+}
+\end{lstlisting}
